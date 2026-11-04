@@ -24,6 +24,9 @@ from .store import Job, Store
 
 CHUNK_RE = re.compile(r"\bchunk\s+(\d+)\s*(?:/|of)\s*(\d+)", re.I)
 PCT_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
+# An exit after one of these is out of GPU memory: rerunning the same command at the
+# same declaration fails the same way.
+OOM_RE = re.compile(r"RESOURCE_EXHAUSTED|out of memory|hipErrorOutOfMemory|HIP out of memory", re.I)
 
 
 def label(job_id: int) -> str:
@@ -63,12 +66,23 @@ def is_active(job: Job) -> bool:
     return r.stdout.strip() in ("active", "activating", "deactivating", "reloading")
 
 
-def stop_labelled_containers(job_id: int) -> None:
-    r = subprocess.run(["docker", "ps", "-q", "--filter", f"label={label(job_id)}"],
-                       capture_output=True, text=True)
-    ids = r.stdout.split()
+def _labelled(job_id: int, all_states: bool) -> list:
+    r = subprocess.run(["docker", "ps", "-q", *(["-a"] if all_states else []),
+                        "--filter", f"label={label(job_id)}"], capture_output=True, text=True)
+    return r.stdout.split()
+
+
+def stop_labelled_containers(job_id: int, wait_seconds: float = 60) -> None:
+    """Stop the job's containers and wait until they are gone, so a rerun of the same
+    command cannot collide with a `--rm` container that is still being removed."""
+    ids = _labelled(job_id, all_states=False)
     if ids:
         subprocess.run(["docker", "stop", "-t", "20", *ids], capture_output=True)
+    deadline = time.time() + wait_seconds
+    while (ids := _labelled(job_id, all_states=True)) and time.time() < deadline:
+        time.sleep(1)
+    if ids:
+        subprocess.run(["docker", "rm", "-f", *ids], capture_output=True)
 
 
 def parse_progress(line: str):
@@ -118,15 +132,19 @@ def wrap(cfg: Config, job_id: int) -> int:
 
     signal.signal(signal.SIGTERM, on_term)
     signal.signal(signal.SIGINT, on_term)
+    oom = False
     for raw in iter(proc.stdout.readline, b""):
         log.write(raw)
-        got = parse_progress(raw.decode(errors="replace"))
+        line = raw.decode(errors="replace")
+        oom = oom or bool(OOM_RE.search(line))
+        got = parse_progress(line)
         if got:
             store.progress(job_id, chunk=got[0], chunks=got[1], pct=got[2])
     code = proc.wait()
     stop_labelled_containers(job_id)
     log.write(f"== gpu-manager: exit {code} {time.strftime('%F %T')}\n".encode())
-    (d / "result.json").write_text(json.dumps({"exit_code": code, "at": time.time()}))
+    (d / "result.json").write_text(json.dumps(
+        {"exit_code": code, "at": time.time(), "oom": oom and code != 0}))
     return 0
 
 

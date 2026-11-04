@@ -71,6 +71,26 @@ class TestWrap(Tmp):
         log = (self.cfg.job_dir(jid) / "log").read_text()
         self.assertIn("chunk 1/3", log)
 
+    def test_oom_line_marks_the_result(self):
+        script = "import sys; print('RESOURCE_EXHAUSTED: Out of memory while trying to allocate', flush=True); sys.exit(1)"
+        jid = self.submit([sys.executable, "-c", script])
+        with mock.patch.object(runner, "stop_labelled_containers"):
+            runner.wrap(self.cfg, jid)
+        self.assertTrue(runner.take_result(self.cfg, jid)["oom"])
+
+    def test_waits_for_container_removal_then_forces_it(self):
+        seen = {"n": 0}
+        def fake_labelled(job_id, all_states):
+            seen["n"] += 1
+            return ["abc"]  # never goes away on its own
+        with mock.patch.object(runner, "_labelled", side_effect=fake_labelled), \
+             mock.patch.object(runner.subprocess, "run") as run:
+            runner.stop_labelled_containers(1, wait_seconds=1.5)
+        cmds = [c.args[0][:3] for c in run.call_args_list]
+        self.assertIn(["docker", "stop", "-t"], cmds)
+        self.assertIn(["docker", "rm", "-f"], cmds)
+        self.assertGreater(seen["n"], 2)
+
     def test_sigterm_reaches_the_job(self):
         jid = self.submit([sys.executable, "-c", self.script, "30"])
         conf = self.dir / "config.toml"
@@ -104,6 +124,11 @@ class TestReconcile(Tmp):
         self.assertEqual((job.status, job.failures), ("queued", 1))
         job = self.reconcile(jid, {"exit_code": 1})
         self.assertEqual((job.status, job.failures), ("failed", 2))
+
+    def test_out_of_memory_fails_without_retry(self):
+        job = self.reconcile(self.submit(["x"]), {"exit_code": 1, "oom": True})
+        self.assertEqual((job.status, job.failures), ("failed", 1))
+        self.assertIn("out of GPU memory", self.store.events(0)[-1]["what"])
 
     def test_lost_unit_is_an_interruption_not_a_failure(self):
         job = self.reconcile(self.submit(["x"]), None)

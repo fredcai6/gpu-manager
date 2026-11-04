@@ -68,6 +68,11 @@ class Daemon:
             elif res["exit_code"] == 0:
                 self.store.update(job.id, status="done", ended_at=now, exit_code=0)
                 self.store.event(job.id, "done")
+            elif res.get("oom"):
+                self.store.update(job.id, status="failed", ended_at=now,
+                                  failures=job.failures + 1, exit_code=res["exit_code"])
+                self.store.event(job.id, f"out of GPU memory at {job.vram_mib} MiB declared; "
+                                         "not retried (resubmit with more --vram)")
             elif job.failures < job.retries:
                 self.store.update(job.id, status="queued", failures=job.failures + 1,
                                   exit_code=res["exit_code"])
