@@ -43,8 +43,10 @@ rewrites it every 30 s into each directory in `page_dirs`.
 
 ## How the card is shared
 
-- **The interactive pair:** `interactive-llm-1` (a 27B model, :8005) and
-  `interactive-asr-1` (:8006), serving chat, voice notes and tutoring clients.
+- **The interactive pair:** `interactive-llm-1` (:8005) and `interactive-asr-1`
+  (:8006), serving chat, voice notes and tutoring clients. The model, image and
+  flags come from the env file (`LLM_IMAGE`, `LLM_MODEL_FILE`, `LLM_EXTRA_ARGS`, ...);
+  set `pair_vram_mib` to what the pair measures.
 - **Batch takes the card** once no interactive request has arrived for 30 minutes.
   The broker lets in-flight requests finish (up to 2 minutes), stops the pair, and
   runs jobs first come, first served. A later job may start beside others only if it
@@ -58,10 +60,14 @@ rewrites it every 30 s into each directory in `page_dirs`.
   Docker bridges (clients via the `gate` container or `host.docker.internal`) are
   interactive. Only interactive requests reset the hold.
 
-Measured on a 32 GB Radeon AI PRO R9700: the 27B (Q4_K_M, 64k context) takes
-22.4 GB and the ASR model 6.6 GB, so the pair holds 29.2 GB and leaves about 3 GB
-beside it. The 27B loads in about 22 s. `docker pause` frees no VRAM, so a paused
-job still blocks the card.
+Measured on a 32 GB Radeon AI PRO R9700, with a 1.7B ASR model taking 6.6 GB:
+
+| LLM | pair VRAM | room for batch beside it | cold load |
+|---|---|---|---|
+| Qwen3.8 27B Q4_K_M, 64k context, 16 slots | 29.2 GB | ~1.5 GB | ~22 s |
+| Nemotron-Labs Dory 1.0 4B Q5_K_M, 32k context, 4 slots | 14.9 GB | ~16 GB | ~3 s |
+
+`docker pause` frees no VRAM, so a paused job still blocks the card.
 
 ## Layout
 

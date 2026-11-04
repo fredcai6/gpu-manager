@@ -55,4 +55,4 @@ echo "asr response: $asr"
 after=$(ingest_hits)
 case "$after" in ''|*[!0-9]*) echo "FAIL: ingest logs unreadable or empty (after)"; exit 1;; esac
 [ "$after" = "$before" ] || { echo "FAIL: ingest hit (POST /ingest $before -> $after)"; exit 1; }
-echo "exercise complete (record outputs in docs/CUTOVER_EVIDENCE.md)"
+echo "check complete"

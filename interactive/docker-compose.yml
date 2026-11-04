@@ -38,7 +38,7 @@ services:
   llm:
     logging: *default-logging
     # keep the historical image tag so dependents of `docker-llm` are unchanged.
-    image: docker-llm:latest
+    image: ${LLM_IMAGE:-docker-llm:latest}
     # SHIPS DARK. up.sh runs a bare `compose up --build`, so without a profile this
     # would start on every invocation and restart-loop until the weights drive is
     # mounted and a GGUF is downloaded. Enable by setting COMPOSE_PROFILES=llm in
@@ -84,7 +84,6 @@ services:
       --host 0.0.0.0
       --port 8005
       --model /models/gguf/${LLM_MODEL_FILE:-Qwen3.8-27B-Q4_K_M.gguf}
-      --mmproj /models/gguf/${LLM_MMPROJ_FILE:-mmproj-Qwen3.8-27B-f16.gguf}
       --device ${LLM_DEVICE:-ROCm0}
       --alias ${LLM_MODEL_ALIAS:-local}
       --ctx-size ${LLM_CTX_SIZE:-65536}
@@ -93,6 +92,7 @@ services:
       --parallel ${LLM_PARALLEL:-16}
       --jinja
       ${LLM_EXTRA_ARGS:-}
+    # A vision projector, KV-cache type and other model-specific flags go in LLM_EXTRA_ARGS.
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8005/health"]
       interval: 10s
