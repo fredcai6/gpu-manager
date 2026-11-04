@@ -19,6 +19,21 @@
 # Batch may take the card after this long without an interactive request.
 # hold_minutes = 30
 
-# Peak VRAM of the interactive pair, and headroom kept free on top of every job.
-# pair_vram_mib = 30000
+# Headroom kept free on top of every job and the pair.
 # margin_mib = 1024
+
+# Single model: the env file above and the pair's measured VRAM.
+# pair_vram_mib = 30000
+
+# Several models in the LLM slot instead (replaces env_file / pair_vram_mib). Each env
+# file holds the pair's full settings with that LLM; keep the ASR_* lines identical.
+# default_model = "small"
+#
+# [models.small]
+# env_file = "~/.config/gpu-manager/small.env"
+# vram_mib = 12500
+#
+# [models.big]
+# env_file = "~/.config/gpu-manager/big.env"
+# aliases = ["big-model-file-name"]
+# vram_mib = 27500

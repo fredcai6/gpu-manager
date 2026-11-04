@@ -87,7 +87,7 @@ def _usage(s: Dict[str, Any], pair_vram_mib: int) -> str:
     pair_mib = 0
     if b.get("pair") in ("up", "starting", "stopping"):
         pair_mib = min(used, pair_vram_mib)
-        parts.append(("Interactive LLM + ASR", pair_mib, "var(--s1)"))
+        parts.append((f"Interactive {b.get('model') or 'LLM'} + ASR", pair_mib, "var(--s1)"))
     for i, j in enumerate(s["running"]):
         parts.append((f"#{j['id']} {j['name']}", j["vram_mib"], _job_colour(i)))
     other = used - sum(p[1] for p in parts)
@@ -145,6 +145,8 @@ def render(s: Dict[str, Any], pair_vram_mib: int = 30000) -> str:
                    f'<div class="n">GPU busy {"?" if busy is None else f"{busy}%"}</div>{_usage(s, pair_vram_mib)}</div>')
         out.append(f'<div class="tile"><div class="k">Interactive tier</div>'
                    f'<div class="v"><span class="st {pcls}">{_e(ptxt)}</span></div>'
+                   f'<div class="n">{_e(b.get("model") or "")}'
+                   f'{" → " + _e(b["want"]) if b.get("want") not in (None, b.get("model")) else ""}</div>'
                    f'<div class="n">{_e(hold)}</div></div>')
         out.append(f'<div class="tile"><div class="k">Batch</div><div class="v">{len(s["running"])} running</div>'
                    f'<div class="n">{len(s["queued"])} waiting</div></div>')

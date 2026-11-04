@@ -90,6 +90,7 @@ class Daemon:
         if self.pair_action and self.pair_action.is_alive():
             return  # starting or stopping; the thread owns the state
         self.pair = interactive.state(self.cfg)
+        self.gate.set_loaded(interactive.loaded_model(self.cfg))
         up = self.pair == "up"
         self.gate.set_ok(self.cfg.llm_backend, up)
         self.gate.set_ok(self.cfg.asr_backend, up)
@@ -121,9 +122,38 @@ class Daemon:
                 self.gate.reopen()
         self._pair_thread(go, "interactive pair stopped")
 
-    def start_pair(self) -> None:
+    def start_pair(self, model: str) -> None:
         self.pair = "starting"
-        self._pair_thread(lambda: interactive.start(self.cfg), "interactive pair started")
+        self._pair_thread(lambda: interactive.start(self.cfg, model),
+                          f"interactive pair started with {model}")
+
+    def swap_model(self, model: str) -> None:
+        """Let in-flight requests finish, then recreate the llm with `model`."""
+        self.pair = "starting"
+        self.gate.set_ok(self.cfg.llm_backend, False)
+
+        def go():
+            left = self.gate.close_and_drain(self.cfg.drain_seconds)
+            if left:
+                self.store.event(None, f"switching llm with {left} request(s) still in flight")
+            try:
+                interactive.swap(self.cfg, model)
+            finally:
+                self.gate.reopen()
+        self._pair_thread(go, f"llm switched to {model}")
+
+    def wanted_model(self, now: float) -> str:
+        """The model asked for by waiting requests, else the one most recently asked
+        for by name within the hold, else the default."""
+        default = self.cfg.default
+        waiting = {m: n for m, n in self.gate.waiting_for.items() if n > 0}
+        if waiting:
+            if self.gate.loaded in waiting:
+                return self.gate.loaded
+            return max(waiting, key=waiting.get)
+        recent = {m: t for m, t in self.gate.asked_at.items()
+                  if now - t < self.cfg.hold_minutes * 60}
+        return max(recent, key=recent.get) if recent else default
 
     def apply(self, actions) -> None:
         for act in actions:
@@ -146,7 +176,9 @@ class Daemon:
             elif kind == "stop_pair":
                 self.stop_pair()
             elif kind == "start_pair":
-                self.start_pair()
+                self.start_pair(act[1])
+            elif kind == "swap_model":
+                self.swap_model(act[1])
 
     # -- loop -------------------------------------------------------------
     def tick(self) -> None:
@@ -158,6 +190,8 @@ class Daemon:
                 self.store.update(job.id, status="stopping")
                 runner.stop(job)
         card, total, used, busy = read_card(self.cfg)
+        now = time.time()
+        want = self.wanted_model(now)
         self.store.set_kv("last_interactive_at", self.gate.last_interactive_at)
         view = scheduler.View(
             now=time.time(),
@@ -168,30 +202,36 @@ class Daemon:
             vram_total_mib=total, vram_used_mib=used,
             take=bool(self.store.get_kv("take", False)),
             demand_pending=self.gate.waiting_interactive > 0,
+            loaded=self.gate.loaded, want=want,
         )
         pair_busy = self.pair_action is not None and self.pair_action.is_alive()
-        actions = scheduler.decide(view, self.cfg.margin_mib, self.cfg.pair_vram_mib,
+        vram = {m.name: m.vram_mib for m in self.cfg.model_table().values()}
+        actions = scheduler.decide(view, self.cfg.margin_mib, vram,
                                    self.cfg.hold_minutes, self.cfg.preempt_on_interactive)
         if pair_busy:
-            actions = [a for a in actions if a[0] not in ("stop_pair", "start_pair")]
+            actions = [a for a in actions if a[0] not in ("stop_pair", "start_pair", "swap_model")]
         self.apply(actions)
         self.store.set_kv("daemon", {"at": time.time(), "pair": self.pair,
                                      "vram_total_mib": total, "vram_used_mib": used,
                                      "busy_pct": busy, "card": card, "in_flight": self.gate.in_flight, "waiting": self.gate.waiting,
-                                     "waiting_interactive": self.gate.waiting_interactive})
+                                     "waiting_interactive": self.gate.waiting_interactive,
+                                     "model": self.gate.loaded, "want": want,
+                                     "waiting_for": dict(self.gate.waiting_for)})
 
     def publish_page(self) -> None:
         if time.time() - self.page_at < self.cfg.page_seconds:
             return
         self.page_at = time.time()
         try:
-            text = page.render(board.snapshot(self.cfg, self.store), self.cfg.pair_vram_mib)
+            table = self.cfg.model_table()
+            pair_mib = table[self.gate.loaded].vram_mib if self.gate.loaded in table else table[self.cfg.default].vram_mib
+            text = page.render(board.snapshot(self.cfg, self.store), pair_mib)
             page.publish(text, [os.path.expanduser(d) for d in self.cfg.page_dirs])
         except Exception:
             log.exception("status page")
 
     def run(self) -> None:
-        proxy.serve(self.gate, self.cfg.listen, self.cfg.llm_port, self.cfg.llm_backend)
+        proxy.serve(self.gate, self.cfg.listen, self.cfg.llm_port, self.cfg.llm_backend, self.cfg.resolve)
         proxy.serve(self.gate, self.cfg.listen, self.cfg.asr_port, self.cfg.asr_backend)
         self.store.event(None, "broker started")
         while True:

@@ -6,11 +6,32 @@ import dataclasses
 import os
 import tomllib
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 REPO = Path(__file__).resolve().parent.parent
 MIB = 1024 * 1024
 PATHS = ("state_dir", "compose_file", "env_file")
+
+
+@dataclasses.dataclass(frozen=True)
+class Model:
+    """One LLM the interactive pair can run. `env_file` holds the pair's full settings
+    with this LLM (LLM_IMAGE, LLM_MODEL_FILE, flags, and the ASR's); `vram_mib` is
+    what the pair measures with it."""
+    name: str
+    env_file: Optional[Path]
+    vram_mib: int
+    aliases: Tuple[str, ...] = ()
+
+    @property
+    def model_file(self) -> Optional[str]:
+        """LLM_MODEL_FILE from the env file: how the running container is recognised."""
+        if not self.env_file or not Path(self.env_file).exists():
+            return None
+        for line in Path(self.env_file).read_text().splitlines():
+            if line.startswith("LLM_MODEL_FILE="):
+                return line.split("=", 1)[1].strip()
+        return None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -20,8 +41,13 @@ class Config:
     pci_id: Optional[str] = None
     # Headroom kept free on top of every declared footprint.
     margin_mib: int = 1024
-    # Measured 2026-11-03: 27B 22.4 GB + ASR 6.6 GB = 29391 MiB.
+    # The pair's VRAM when no [models] table is configured.
     pair_vram_mib: int = 30000
+    # LLMs the pair can switch between ([models.NAME] tables). A request naming one
+    # (by name or alias) loads it; anything else is served by whatever is loaded.
+    # The default is resident whenever no other model was asked for within hold_minutes.
+    models: Dict[str, Model] = dataclasses.field(default_factory=dict)
+    default_model: Optional[str] = None
     # Batch may take the card once no interactive request has arrived for this long.
     hold_minutes: float = 30.0
     # Off: an interactive request waits for running batch work instead of evicting it.
@@ -52,6 +78,24 @@ class Config:
     def db_path(self) -> Path:
         return self.state_dir / "broker.db"
 
+    def model_table(self) -> Dict[str, Model]:
+        if self.models:
+            return self.models
+        return {"default": Model("default", self.env_file, self.pair_vram_mib)}
+
+    @property
+    def default(self) -> str:
+        return self.default_model or next(iter(self.model_table()))
+
+    def resolve(self, requested: Optional[str]) -> Optional[str]:
+        """The registered model a request names, or None if it names none."""
+        if not requested:
+            return None
+        for m in self.model_table().values():
+            if requested == m.name or requested in m.aliases:
+                return m.name
+        return None
+
     def job_dir(self, job_id: int) -> Path:
         return self.state_dir / "jobs" / str(job_id)
 
@@ -67,7 +111,13 @@ def load(path: Optional[Path] = None) -> Config:
     for key, value in raw.items():
         if key not in fields:
             raise ValueError(f"unknown config key {key!r} in {path}")
-        default = getattr(Config, key)
+        if key == "models":
+            kwargs[key] = {
+                name: Model(name, Path(m["env_file"]).expanduser() if m.get("env_file") else None,
+                            int(m["vram_mib"]), tuple(m.get("aliases", ())))
+                for name, m in value.items()}
+            continue
+        default = getattr(Config, key, None)
         if key in PATHS:
             value = Path(value).expanduser()
         elif isinstance(default, tuple):

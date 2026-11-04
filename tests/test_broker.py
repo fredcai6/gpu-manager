@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from gpu_manager import daemon, proxy, runner
+from gpu_manager import config, daemon, proxy, runner
 from gpu_manager.config import REPO, Config
 from gpu_manager.store import Store
 
@@ -231,6 +231,37 @@ class TestProxy(unittest.TestCase):
         finally:
             Backend.do_POST = orig
 
+    def post_model(self, model, out):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=20)
+        c.request("POST", "/v1/chat/completions", body=json.dumps({"model": model}).encode(),
+                  headers={"Content-Type": "application/json"})
+        out.append(c.getresponse().status)
+
+    def test_model_named_in_query_or_body(self):
+        self.assertEqual(proxy.requested_model(b"", "/props?model=Qwen3.8-27B-Q4_K_M"), "Qwen3.8-27B-Q4_K_M")
+        self.assertEqual(proxy.requested_model(b'{"model": "local"}', "/v1/chat/completions"), "local")
+        self.assertIsNone(proxy.requested_model(b"", "/props"))
+
+    def test_named_model_waits_for_it_and_local_takes_what_is_loaded(self):
+        self.front.shutdown()
+        self.front = proxy.serve(self.gate, ["127.0.0.1"], 0, self.bport,
+                                 resolve=lambda m: "qwen" if m in ("qwen", "Qwen3.8-27B-Q4_K_M") else None)[0]
+        self.port = self.front.server_address[1]
+        self.gate.set_ok(self.bport, True)
+        self.gate.set_loaded("dory")
+        local, named = [], []
+        self.post_model("local", local)
+        self.assertEqual(local, [200], "an unnamed model is served by whatever is loaded")
+        t = threading.Thread(target=self.post_model, args=("Qwen3.8-27B-Q4_K_M", named))
+        t.start()
+        time.sleep(0.5)
+        self.assertEqual(named, [], "a request naming qwen waits while dory is loaded")
+        self.assertEqual(dict(self.gate.waiting_for), {"qwen": 1})
+        self.gate.set_loaded("qwen")
+        t.join(10)
+        self.assertEqual(named, [200])
+        self.assertIn("qwen", self.gate.asked_at)
+
     def test_loopback_is_batch(self):
         self.gate.set_ok(self.bport, True)
         self.post([])
@@ -247,6 +278,30 @@ class TestProxy(unittest.TestCase):
         self.assertGreater(time.time() - t0, 0.4)
         self.gate.reopen()
 
+
+
+class TestWantedModel(Tmp):
+    def wanted(self, asked, waiting=None, loaded="dory"):
+        cfg = Config(state_dir=self.cfg.state_dir, default_model="dory", models={
+            "dory": config.Model("dory", None, 12500), "qwen": config.Model("qwen", None, 27500)})
+        d = daemon.Daemon(cfg, store=self.store)
+        d.gate.asked_at, d.gate.loaded = dict(asked), loaded
+        d.gate.waiting_for.update(waiting or {})
+        return d.wanted_model(10_000.0)
+
+    def test_default_when_nothing_asked(self):
+        self.assertEqual(self.wanted({}), "dory")
+
+    def test_named_model_held_for_the_hold(self):
+        self.assertEqual(self.wanted({"qwen": 10_000.0 - 29 * 60}), "qwen")
+        self.assertEqual(self.wanted({"qwen": 10_000.0 - 31 * 60}), "dory")
+
+    def test_most_recent_name_wins_so_models_do_not_flap(self):
+        self.assertEqual(self.wanted({"qwen": 9_000.0, "dory": 9_500.0}), "dory")
+
+    def test_waiting_requests_decide_and_loaded_wins_ties(self):
+        self.assertEqual(self.wanted({}, waiting={"qwen": 1}), "qwen")
+        self.assertEqual(self.wanted({}, waiting={"qwen": 1, "dory": 1}, loaded="dory"), "dory")
 
 
 class TestObservePair(Tmp):

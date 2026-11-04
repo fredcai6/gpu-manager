@@ -74,6 +74,8 @@ def render_text(s: Dict[str, Any]) -> str:
         out.append("  TAKEN by operator: nothing starts until `gpu release`")
     pair = b["pair"]
     line = f"  Interactive pair: {pair}"
+    if b.get("model"):
+        line += f" ({b['model']}" + (f", switching to {b['want']}" if b.get("want") not in (None, b["model"]) else "") + ")"
     if s["last_interactive_at"]:
         line += f"; last interactive request {_ago(now - s['last_interactive_at'])} ago"
     if pair == "up" and s["queued"]:

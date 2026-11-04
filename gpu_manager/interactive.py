@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import urllib.request
+from typing import Optional
 
 from .config import Config
 
 
-def _compose(cfg: Config, *args: str) -> subprocess.CompletedProcess:
-    env = ["--env-file", str(cfg.env_file)] if cfg.env_file else []
+def _compose(cfg: Config, *args: str, model: Optional[str] = None) -> subprocess.CompletedProcess:
+    env_file = cfg.model_table()[model or cfg.default].env_file
+    env = ["--env-file", str(env_file)] if env_file else []
     return subprocess.run(
         ["docker", "compose", "-f", str(cfg.compose_file), *env,
          "--profile", "llm", "--profile", "asr", *args],
@@ -36,10 +40,34 @@ def state(cfg: Config) -> str:
     return "starting" if running(cfg) else "down"
 
 
-def start(cfg: Config) -> None:
-    r = _compose(cfg, "up", "-d", "--no-build", "llm", "asr")
+def loaded_model(cfg: Config) -> Optional[str]:
+    """Which registered model the llm container is set to run, from its --model flag."""
+    r = subprocess.run(["docker", "inspect", "-f", "{{json .Config.Cmd}}", "interactive-llm-1"],
+                       capture_output=True, text=True)
+    if r.returncode:
+        return None
+    try:
+        cmd = json.loads(r.stdout)
+        path = cmd[cmd.index("--model") + 1]
+    except (ValueError, IndexError, TypeError):
+        return None
+    for m in cfg.model_table().values():
+        if m.model_file and os.path.basename(path) == m.model_file:
+            return m.name
+    return None
+
+
+def start(cfg: Config, model: Optional[str] = None) -> None:
+    r = _compose(cfg, "up", "-d", "--no-build", "llm", "asr", model=model)
     if r.returncode:
         raise RuntimeError(f"compose up failed: {r.stderr.strip()[-400:]}")
+
+
+def swap(cfg: Config, model: str) -> None:
+    """Recreate only the llm container with `model`; the transcriber keeps running."""
+    r = _compose(cfg, "up", "-d", "--no-build", "llm", model=model)
+    if r.returncode:
+        raise RuntimeError(f"compose up llm failed: {r.stderr.strip()[-400:]}")
 
 
 def stop(cfg: Config) -> None:

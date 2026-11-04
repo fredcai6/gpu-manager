@@ -52,6 +52,13 @@ rewrites it every 30 s into each directory in `page_dirs`.
   runs jobs first come, first served. A later job may start beside others only if it
   doesn't delay the job at the head of the queue.
 - **The pair comes back** when the queue is empty and it fits.
+- **Switching models:** with `[models.*]` in the config, the LLM slot can run any of
+  several models. The default stays resident. A request that names another model
+  (by name or alias, in the JSON `"model"` field or as `?model=` on a GET such as
+  `/props`) waits while the broker swaps it in, and that model stays until no
+  request has named a different one for `hold_minutes`. Requests naming no
+  registered model (e.g. `"local"`) are served by whatever is loaded. Only the LLM
+  is recreated; the transcriber keeps running.
 - **No preemption:** an interactive request does not evict batch work
   (`preempt_on_interactive = false`).
 - **Requests wait:** any request to :8005/:8006 waits while the pair is down, and

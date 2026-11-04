@@ -30,7 +30,7 @@ def run(v, preempt=False):
 
 class TestScheduler(unittest.TestCase):
     def test_idle_card_with_empty_queue_brings_pair_up(self):
-        self.assertEqual(run(view(pair="down")), [("start_pair",)])
+        self.assertEqual(run(view(pair="down")), [("start_pair", "default")])
 
     def test_nothing_to_do_when_pair_up_and_queue_empty(self):
         self.assertEqual(run(view()), [])
@@ -75,7 +75,7 @@ class TestScheduler(unittest.TestCase):
 
     def test_pair_returns_when_queue_drains_and_room(self):
         running = job(9, 1000, status="running", started=1.0)
-        self.assertEqual(run(view(active=[running], pair="down")), [("start_pair",)])
+        self.assertEqual(run(view(active=[running], pair="down")), [("start_pair", "default")])
 
     def test_pair_stays_down_beside_big_running_job(self):
         running = job(9, 18000, status="running", started=1.0)
@@ -96,6 +96,42 @@ class TestScheduler(unittest.TestCase):
         running = job(9, 1000, status="running", started=1.0)
         acts = run(view(queued=[job(1, 500)], active=[running], take=True))
         self.assertEqual(acts, [("stop_job", 9, "requeue"), ("stop_pair",)])
+
+    # -- model switching (Dory 12.5 GB resident, Qwen 26.5 GB on request) ------------
+    MODELS = {"dory": 12500, "qwen": 26500}
+
+    def mv(self, **kw):
+        kw.setdefault("used", None)
+        loaded = kw.pop("loaded", "dory")
+        want = kw.pop("want", "dory")
+        v = view(**kw)
+        v.loaded, v.want = loaded, want
+        if kw["used"] is None:
+            v.vram_used_mib = (self.MODELS[loaded] if v.pair != "down" else 0) + sum(j.vram_mib for j in v.active)
+        return decide(v, MARGIN, self.MODELS, 30, False)
+
+    def test_request_for_other_model_swaps_when_it_fits(self):
+        self.assertEqual(self.mv(want="qwen"), [("swap_model", "qwen")])
+
+    def test_swap_waits_for_batch_and_blocks_jobs_that_would_starve_it(self):
+        running = job(9, 10000, status="running", started=1.0)
+        # 31600 cap - 10000 batch < 26500 qwen: wait; a 2 GB job would make it worse
+        self.assertEqual(self.mv(want="qwen", active=[running], queued=[job(1, 2000)]), [])
+
+    def test_job_that_leaves_room_for_the_swap_still_starts(self):
+        self.assertEqual(self.mv(want="qwen", queued=[job(1, 4000)]),
+                         [("swap_model", "qwen"), ("start_job", 1)])
+
+    def test_back_to_default(self):
+        self.assertEqual(self.mv(loaded="qwen", want="dory"), [("swap_model", "dory")])
+
+    def test_pair_returns_with_wanted_model(self):
+        self.assertEqual(self.mv(pair="down", want="qwen"), [("start_pair", "qwen")])
+
+    def test_unknown_loaded_model_is_left_alone(self):
+        v = view()
+        v.loaded, v.want = None, "dory"
+        self.assertEqual(decide(v, MARGIN, self.MODELS, 30, False), [])
 
     def test_unreadable_card_starts_nothing(self):
         v = view(queued=[job(1, 500)], pair="down")
