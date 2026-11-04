@@ -60,12 +60,17 @@ rewrites it every 30 s into each directory in `page_dirs`.
   Docker bridges (clients via the `gate` container or `host.docker.internal`) are
   interactive. Only interactive requests reset the hold.
 
-Measured on a 32 GB Radeon AI PRO R9700, with a 1.7B ASR model taking 6.6 GB:
+Measured on a 32 GB Radeon AI PRO R9700, with Qwen3-ASR 1.7B as the transcriber:
 
-| LLM | pair VRAM | room for batch beside it | cold load |
-|---|---|---|---|
-| Qwen3.8 27B Q4_K_M, 64k context, 16 slots | 29.2 GB | ~1.5 GB | ~22 s |
-| Nemotron-Labs Dory 1.0 4B Q5_K_M, 32k context, 4 slots | 14.9 GB | ~16 GB | ~3 s |
+| LLM | ASR context | pair VRAM | room for batch beside it | cold load |
+|---|---|---|---|---|
+| Qwen3.8 27B Q4_K_M, 64k context, 16 slots | 32k | 29.2 GB | ~1.5 GB | ~22 s |
+| Nemotron-Labs Dory 1.0 4B Q5_K_M, 32k context, 4 slots | 32k | 14.9 GB | ~16 GB | ~3 s |
+| the same Dory | 8k | 12.0 GB | ~19 GB | ~3 s |
+
+The ASR context only has to hold one request. A 2-minute chunk is ~1.6k audio tokens
+(about 13 per second), plus the transcript (at most ~0.6k for very fast speech) and any
+biasing vocabulary (~1.8k tokens for 4,000 characters); the worst case measured 3.7k of 8k.
 
 `docker pause` frees no VRAM, so a paused job still blocks the card.
 
