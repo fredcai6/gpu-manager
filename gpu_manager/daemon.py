@@ -40,6 +40,10 @@ class Daemon:
         self.gate = gate or proxy.Gate(cfg.queue_wait_seconds)
         self.pair = "down"
         self.pair_action: Optional[threading.Thread] = None
+        # On-demand services: state, the thread starting/stopping one, when it came up.
+        self.svc_state = {name: "down" for name in cfg.services}
+        self.svc_action: dict = {}
+        self.svc_up_at: dict = {}
         self.page_at = 0.0
         # No history after a (re)start: hold from now rather than evict at once.
         self.gate.last_interactive_at = max(
@@ -95,6 +99,17 @@ class Daemon:
         self.gate.set_ok(self.cfg.llm_backend, up)
         self.gate.set_ok(self.cfg.asr_backend, up)
 
+    def observe_services(self) -> None:
+        for name, svc in self.cfg.services.items():
+            t = self.svc_action.get(name)
+            if t and t.is_alive():
+                continue
+            st = interactive.service_state(self.cfg, svc)
+            if st == "up" and self.svc_state[name] != "up":
+                self.svc_up_at[name] = time.time()
+            self.svc_state[name] = st
+            self.gate.set_ok(svc.backend, st == "up")
+
     # -- actions ----------------------------------------------------------
     def _pair_thread(self, fn, label: str) -> None:
         def run():
@@ -142,15 +157,54 @@ class Daemon:
                 self.gate.reopen()
         self._pair_thread(go, f"llm switched to {model}")
 
+    def _service_thread(self, name: str, fn, label: str) -> None:
+        def run():
+            try:
+                fn()
+                self.store.event(None, label)
+            except Exception as exc:
+                self.store.event(None, f"{label} failed: {exc}")
+                log.exception(label)
+        t = threading.Thread(target=run, daemon=True)
+        self.svc_action[name] = t
+        t.start()
+
+    def start_service(self, name: str) -> None:
+        svc = self.cfg.services[name]
+        self.svc_state[name] = "starting"
+        self._service_thread(name, lambda: interactive.start_service(self.cfg, svc),
+                             f"service {name} started")
+
+    def stop_service(self, name: str) -> None:
+        svc = self.cfg.services[name]
+        self.svc_state[name] = "stopping"
+        self.gate.set_ok(svc.backend, False)  # later requests wait for the next start
+        self._service_thread(name, lambda: interactive.stop_service(self.cfg, svc),
+                             f"service {name} stopped")
+
+    def services_view(self, now: float):
+        out = []
+        for name, svc in self.cfg.services.items():
+            last = max(self.gate.used_at.get(svc.backend, 0.0), self.svc_up_at.get(name, 0.0))
+            out.append(scheduler.Svc(
+                name, self.svc_state[name], svc.vram_mib,
+                waiting=self.gate.waiting_on[svc.backend], in_flight=self.gate.busy_on[svc.backend],
+                idle_seconds=now - last if last else 0.0, idle_limit=svc.idle_seconds))
+        return out
+
     def wanted_model(self, now: float) -> str:
         """The model asked for by waiting requests, else the one most recently asked
-        for by name within the hold, else the default."""
+        for by name within the hold, else the default. A service waiting for room
+        outranks the hold: the pair goes back to the default to make that room."""
         default = self.cfg.default
         waiting = {m: n for m, n in self.gate.waiting_for.items() if n > 0}
         if waiting:
             if self.gate.loaded in waiting:
                 return self.gate.loaded
             return max(waiting, key=waiting.get)
+        if any(self.svc_state[n] == "down" and self.gate.waiting_on[s.backend]
+               for n, s in self.cfg.services.items()):
+            return default
         recent = {m: t for m, t in self.gate.asked_at.items()
                   if now - t < self.cfg.hold_minutes * 60}
         return max(recent, key=recent.get) if recent else default
@@ -179,11 +233,16 @@ class Daemon:
                 self.start_pair(act[1])
             elif kind == "swap_model":
                 self.swap_model(act[1])
+            elif kind == "start_service":
+                self.start_service(act[1])
+            elif kind == "stop_service":
+                self.stop_service(act[1])
 
     # -- loop -------------------------------------------------------------
     def tick(self) -> None:
         self.reconcile_jobs()
         self.observe_pair()
+        self.observe_services()
         # Cancels of running jobs go out before scheduling.
         for job in self.store.jobs(("running",)):
             if job.stop_request == "cancel":
@@ -203,6 +262,7 @@ class Daemon:
             take=bool(self.store.get_kv("take", False)),
             demand_pending=self.gate.waiting_interactive > 0,
             loaded=self.gate.loaded, want=want,
+            services=self.services_view(now),
         )
         pair_busy = self.pair_action is not None and self.pair_action.is_alive()
         vram = {m.name: m.vram_mib for m in self.cfg.model_table().values()}
@@ -210,13 +270,16 @@ class Daemon:
                                    self.cfg.hold_minutes, self.cfg.preempt_on_interactive)
         if pair_busy:
             actions = [a for a in actions if a[0] not in ("stop_pair", "start_pair", "swap_model")]
+        svc_busy = {n for n, t in self.svc_action.items() if t.is_alive()}
+        actions = [a for a in actions if not (a[0] in ("start_service", "stop_service") and a[1] in svc_busy)]
         self.apply(actions)
         self.store.set_kv("daemon", {"at": time.time(), "pair": self.pair,
                                      "vram_total_mib": total, "vram_used_mib": used,
                                      "busy_pct": busy, "card": card, "in_flight": self.gate.in_flight, "waiting": self.gate.waiting,
                                      "waiting_interactive": self.gate.waiting_interactive,
                                      "model": self.gate.loaded, "want": want,
-                                     "waiting_for": dict(self.gate.waiting_for)})
+                                     "waiting_for": dict(self.gate.waiting_for),
+                                     "services": {n: self.svc_state[n] for n in self.cfg.services}})
 
     def publish_page(self) -> None:
         if time.time() - self.page_at < self.cfg.page_seconds:
@@ -233,6 +296,8 @@ class Daemon:
     def run(self) -> None:
         proxy.serve(self.gate, self.cfg.listen, self.cfg.llm_port, self.cfg.llm_backend, self.cfg.resolve)
         proxy.serve(self.gate, self.cfg.listen, self.cfg.asr_port, self.cfg.asr_backend)
+        for svc in self.cfg.services.values():
+            proxy.serve(self.gate, self.cfg.listen, svc.port, svc.backend, tiered=False)
         self.store.event(None, "broker started")
         while True:
             try:

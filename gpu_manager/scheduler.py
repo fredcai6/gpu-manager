@@ -15,6 +15,9 @@ Rules, in order:
 5. With nothing waiting, the pair comes back up when it fits, with the wanted model.
 6. When the wanted model differs from the loaded one, the llm is recreated with it
    once it fits; meanwhile no batch job starts that would keep it from fitting.
+7. An on-demand service starts when a request waits for it and it fits, ahead of
+   queued batch (a caller is waiting). It stops once idle for its limit, or at once
+   when idle and its room is needed by a model swap or the head of the queue.
 """
 
 from __future__ import annotations
@@ -24,7 +27,21 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 from .store import Job
 
-Action = Tuple  # ("start_job", id) | ("stop_job", id, reason) | ("stop_pair",) | ("start_pair", model) | ("swap_model", model)
+CROWDED_GRACE_SECONDS = 10.0
+
+Action = Tuple  # ("start_job", id) | ("stop_job", id, reason) | ("stop_pair",) | ("start_pair", model) | ("swap_model", model) | ("start_service", name) | ("stop_service", name)
+
+
+@dataclasses.dataclass
+class Svc:
+    """An on-demand service as the scheduler sees it."""
+    name: str
+    state: str                      # up | starting | stopping | down
+    vram_mib: int
+    waiting: int = 0                # requests waiting for it
+    in_flight: int = 0
+    idle_seconds: float = 0.0       # since it last served a request
+    idle_limit: float = 120.0
 
 
 @dataclasses.dataclass
@@ -40,6 +57,7 @@ class View:
     demand_pending: bool = False    # an interactive request is waiting at the proxy
     loaded: Optional[str] = None    # model the llm container runs (None: unknown)
     want: Optional[str] = None      # model it should run (None: the only/first one)
+    services: Sequence[Svc] = ()
 
 
 def decide(v: View, margin_mib: int, vram: Union[int, Dict[str, int]], hold_minutes: float,
@@ -64,7 +82,8 @@ def decide(v: View, margin_mib: int, vram: Union[int, Dict[str, int]], hold_minu
         return actions  # fail closed: start nothing on an unreadable card
 
     cap = v.vram_total_mib - margin_mib
-    committed = sum(j.vram_mib for j in v.active)
+    held = [sv for sv in v.services if sv.state != "down"]
+    committed = sum(j.vram_mib for j in v.active) + sum(sv.vram_mib for sv in held)
     pair_holds = v.pair in ("up", "starting", "stopping")
     free = v.vram_total_mib - v.vram_used_mib - margin_mib
 
@@ -92,6 +111,27 @@ def decide(v: View, margin_mib: int, vram: Union[int, Dict[str, int]], hold_minu
 
     room = cap - committed - pair_mib
     head = v.queued[0] if v.queued else None
+    # On-demand services: start for a waiting caller; stop when idle and either past
+    # the idle limit or in the way of a swap or of the head of the queue.
+    for sv in v.services:
+        if sv.state == "down" and sv.waiting and sv.vram_mib <= min(room, free):
+            actions.append(("start_service", sv.name))
+            committed += sv.vram_mib
+            room -= sv.vram_mib
+            free -= sv.vram_mib
+    for sv in held:
+        if sv.state != "up" or sv.waiting or sv.in_flight:
+            continue
+        crowding = swap_blocked or (head is not None and head.vram_mib > min(room, free))
+        # A short grace even when crowded: back-to-back requests leave gaps of
+        # milliseconds, and a caller mid-batch should not lose the server between them.
+        if sv.idle_seconds >= sv.idle_limit or (crowding and sv.idle_seconds >= CROWDED_GRACE_SECONDS):
+            actions.append(("stop_service", sv.name))
+    started = {a[1] for a in actions if a[0] == "start_service"}
+    # A service still waiting for room: no batch job may start that keeps it out.
+    svc_need = max((sv.vram_mib for sv in v.services
+                    if sv.state == "down" and sv.waiting and sv.name not in started), default=0)
+
     waiting = list(v.queued)
     for job in v.queued:
         if job.vram_mib > min(room, free):
@@ -99,6 +139,8 @@ def decide(v: View, margin_mib: int, vram: Union[int, Dict[str, int]], hold_minu
         if job is not head and head in waiting and cap - (committed + job.vram_mib) < head.vram_mib:
             continue
         if swap_blocked and cap - (committed + job.vram_mib) < want_mib:
+            continue
+        if svc_need and cap - (committed + job.vram_mib) - pair_mib < svc_need:
             continue
         actions.append(("start_job", job.id))
         waiting.remove(job)

@@ -85,6 +85,8 @@ def render_text(s: Dict[str, Any]) -> str:
     if b.get("waiting"):
         out.append(f"  {b['waiting']} request(s) waiting for the pair"
                    f" ({b.get('waiting_interactive', 0)} interactive)")
+    if b.get("services"):
+        out.append("  On-demand: " + ", ".join(f"{n} {st}" for n, st in b["services"].items()))
     out.append("  Running:" if s["running"] else "  Running: none")
     for j in s["running"]:
         out.append(f"    #{j['id']} {j['name']}  {j['vram_mib'] / 1024:.1f} GB  {j['status']}"

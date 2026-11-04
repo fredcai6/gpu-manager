@@ -59,6 +59,16 @@ rewrites it every 30 s into each directory in `page_dirs`.
   request has named a different one for `hold_minutes`. Requests naming no
   registered model (e.g. `"local"`) are served by whatever is loaded. Only the LLM
   is recreated; the transcriber keeps running.
+- **On-demand services:** a `[services.NAME]` table gives a GPU server its own port
+  (e.g. an OCR model on :8007, `ocr:8007` through the gate) without holding VRAM
+  between uses. The first request starts it (the compose service of the same name,
+  under its own profile) and waits until it is up. It stops after `idle_seconds`
+  without a request, or after 10 s idle when its room is needed by a model swap or
+  the head of the queue. A waiting request ends a model's hold, so the slot goes
+  back to the default to make room. It starts ahead of queued batch, and no batch
+  job starts that would keep a waiting one out. Its callers don't reset the hold.
+  Measured: a cold start plus one page is ~13 s; handing the room back to the 27B
+  is ~12 s.
 - **No preemption:** an interactive request does not evict batch work
   (`preempt_on_interactive = false`).
 - **Requests wait:** any request to :8005/:8006 waits while the pair is down, and

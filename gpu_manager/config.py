@@ -35,6 +35,21 @@ class Model:
 
 
 @dataclasses.dataclass(frozen=True)
+class Service:
+    """A GPU server started on demand: the broker brings it up when a request arrives
+    on `port` and stops it once nothing has used it for `idle_seconds`, or sooner when
+    the room is needed. It runs `compose_service` from the compose file (profile of the
+    same name) with `env_file`, and listens on 127.0.0.1:`backend`."""
+    name: str
+    port: int
+    backend: int
+    vram_mib: int
+    compose_service: str
+    env_file: Optional[Path] = None
+    idle_seconds: float = 120.0
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
     state_dir: Path = Path.home() / ".local/state/gpu-manager"
     # The compute card's PCI address; unset means the AMD card with the most VRAM.
@@ -48,6 +63,8 @@ class Config:
     # The default is resident whenever no other model was asked for within hold_minutes.
     models: Dict[str, Model] = dataclasses.field(default_factory=dict)
     default_model: Optional[str] = None
+    # On-demand servers ([services.NAME] tables), e.g. an OCR model used in bursts.
+    services: Dict[str, Service] = dataclasses.field(default_factory=dict)
     # Batch may take the card once no interactive request has arrived for this long.
     hold_minutes: float = 30.0
     # Off: an interactive request waits for running batch work instead of evicting it.
@@ -116,6 +133,14 @@ def load(path: Optional[Path] = None) -> Config:
                 name: Model(name, Path(m["env_file"]).expanduser() if m.get("env_file") else None,
                             int(m["vram_mib"]), tuple(m.get("aliases", ())))
                 for name, m in value.items()}
+            continue
+        if key == "services":
+            kwargs[key] = {
+                name: Service(name, int(v["port"]), int(v["backend"]), int(v["vram_mib"]),
+                              v.get("compose_service", name),
+                              Path(v["env_file"]).expanduser() if v.get("env_file") else None,
+                              float(v.get("idle_seconds", 120)))
+                for name, v in value.items()}
             continue
         default = getattr(Config, key, None)
         if key in PATHS:

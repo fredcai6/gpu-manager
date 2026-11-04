@@ -1,6 +1,6 @@
 import unittest
 
-from gpu_manager.scheduler import View, decide
+from gpu_manager.scheduler import Svc, View, decide
 from gpu_manager.store import Job
 
 TOTAL = 32624
@@ -104,8 +104,9 @@ class TestScheduler(unittest.TestCase):
         kw.setdefault("used", None)
         loaded = kw.pop("loaded", "dory")
         want = kw.pop("want", "dory")
+        services = kw.pop("services", ())
         v = view(**kw)
-        v.loaded, v.want = loaded, want
+        v.loaded, v.want, v.services = loaded, want, services
         if kw["used"] is None:
             v.vram_used_mib = (self.MODELS[loaded] if v.pair != "down" else 0) + sum(j.vram_mib for j in v.active)
         return decide(v, MARGIN, self.MODELS, 30, False)
@@ -132,6 +133,46 @@ class TestScheduler(unittest.TestCase):
         v = view()
         v.loaded, v.want = None, "dory"
         self.assertEqual(decide(v, MARGIN, self.MODELS, 30, False), [])
+
+    # -- on-demand services (an 11.5 GB OCR server) -----------------------------------
+    def sv(self, state="down", **kw):
+        return Svc("ocr", state, 11500, **kw)
+
+    def test_waiting_service_starts_beside_default_model(self):
+        self.assertEqual(self.mv(services=[self.sv(waiting=1)]), [("start_service", "ocr")])
+
+    def test_waiting_service_starts_ahead_of_queued_batch(self):
+        acts = self.mv(services=[self.sv(waiting=1)], queued=[job(1, 10000)])
+        self.assertEqual(acts, [("start_service", "ocr")])
+
+    def test_batch_that_would_keep_a_waiting_service_out_does_not_start(self):
+        running = job(9, 9000, status="running", started=1.0)
+        # 31600 - 9000 - 12500 = 10100 free: ocr waits; a 2 GB job would make it worse
+        acts = self.mv(services=[self.sv(waiting=1)], active=[running], queued=[job(1, 2000)])
+        self.assertEqual(acts, [])
+
+    def test_service_waits_while_big_model_loaded(self):
+        self.assertEqual(self.mv(loaded="qwen", want="qwen", services=[self.sv(waiting=1)]), [])
+
+    def test_idle_service_stops_after_its_limit(self):
+        s = self.sv("up", idle_seconds=130, idle_limit=120)
+        self.assertEqual(self.mv(services=[s]), [("stop_service", "ocr")])
+
+    def test_recently_used_service_stays(self):
+        self.assertEqual(self.mv(services=[self.sv("up", idle_seconds=30)]), [])
+
+    def test_idle_service_gives_way_to_a_model_swap(self):
+        s = self.sv("up", idle_seconds=15)
+        v = self.mv(want="qwen", services=[s], used=12500 + 11500)
+        self.assertEqual(v, [("stop_service", "ocr")])
+
+    def test_service_between_back_to_back_requests_keeps_its_room(self):
+        s = self.sv("up", idle_seconds=2)
+        self.assertEqual(self.mv(want="qwen", services=[s], used=12500 + 11500), [])
+
+    def test_busy_service_is_not_stopped_for_a_swap(self):
+        s = self.sv("up", in_flight=1, idle_seconds=0)
+        self.assertEqual(self.mv(want="qwen", services=[s], used=12500 + 11500), [])
 
     def test_unreadable_card_starts_nothing(self):
         v = view(queued=[job(1, 500)], pair="down")

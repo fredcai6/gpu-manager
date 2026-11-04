@@ -74,3 +74,32 @@ def stop(cfg: Config) -> None:
     r = _compose(cfg, "stop", "llm", "asr")
     if r.returncode:
         raise RuntimeError(f"compose stop failed: {r.stderr.strip()[-400:]}")
+
+
+# -- on-demand services --------------------------------------------------------------
+def _service_compose(cfg: Config, svc, *args: str) -> subprocess.CompletedProcess:
+    env_file = svc.env_file or cfg.model_table()[cfg.default].env_file
+    env = ["--env-file", str(env_file)] if env_file else []
+    return subprocess.run(
+        ["docker", "compose", "-f", str(cfg.compose_file), *env,
+         "--profile", svc.compose_service, *args],
+        capture_output=True, text=True)
+
+
+def service_state(cfg: Config, svc) -> str:
+    if healthy(svc.backend):
+        return "up"
+    r = _service_compose(cfg, svc, "ps", "--status", "running", "-q", svc.compose_service)
+    return "starting" if r.stdout.split() else "down"
+
+
+def start_service(cfg: Config, svc) -> None:
+    r = _service_compose(cfg, svc, "up", "-d", "--no-build", svc.compose_service)
+    if r.returncode:
+        raise RuntimeError(f"compose up {svc.compose_service} failed: {r.stderr.strip()[-400:]}")
+
+
+def stop_service(cfg: Config, svc) -> None:
+    r = _service_compose(cfg, svc, "stop", svc.compose_service)
+    if r.returncode:
+        raise RuntimeError(f"compose stop {svc.compose_service} failed: {r.stderr.strip()[-400:]}")

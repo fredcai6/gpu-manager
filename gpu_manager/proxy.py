@@ -41,6 +41,11 @@ class Gate:
         self.loaded: Optional[str] = None
         self.waiting_for: Counter = Counter()
         self.asked_at: Dict[str, float] = {}
+        # Per backend port: requests waiting, requests in flight, and when it was last
+        # used (an on-demand service is stopped once idle long enough).
+        self.waiting_on: Counter = Counter()
+        self.busy_on: Counter = Counter()
+        self.used_at: Dict[int, float] = {}
         self.queue_wait_seconds = queue_wait_seconds
 
     def set_ok(self, port: int, ok: bool) -> None:
@@ -79,6 +84,7 @@ class Gate:
                 self.asked_at[model] = time.time()
                 self.waiting_for[model] += 1
             self.waiting += 1
+            self.waiting_on[backend] += 1
             deadline = time.time() + self.queue_wait_seconds
             try:
                 while self.closed or not self.ok.get(backend) or (model and self.loaded != model):
@@ -89,6 +95,8 @@ class Gate:
                         return GONE
                     self.cond.wait(min(left, 1))
                 self.in_flight += 1
+                self.busy_on[backend] += 1
+                self.used_at[backend] = time.time()
                 return ADMITTED
             finally:
                 if model:
@@ -97,12 +105,16 @@ class Gate:
                     if self.waiting_for[model] <= 0:
                         del self.waiting_for[model]
                 self.waiting -= 1
+                self.waiting_on[backend] -= 1
                 if interactive:
                     self.waiting_interactive -= 1
 
-    def done(self) -> None:
+    def done(self, backend: Optional[int] = None) -> None:
         with self.cond:
             self.in_flight -= 1
+            if backend is not None:
+                self.busy_on[backend] -= 1
+                self.used_at[backend] = time.time()
             self.cond.notify_all()
 
 
@@ -138,7 +150,10 @@ def requested_model(body: bytes, path: str = "") -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
-def make_handler(gate: Gate, backend: int, resolve: Callable[[Optional[str]], Optional[str]] = lambda m: None):
+def make_handler(gate: Gate, backend: int, resolve: Callable[[Optional[str]], Optional[str]] = lambda m: None,
+                 tiered: bool = True):
+    """`tiered`: requests from a Docker bridge count as interactive and hold the pair.
+    Off for on-demand services, whose callers should not keep batch off the card."""
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"
 
@@ -173,7 +188,7 @@ def make_handler(gate: Gate, backend: int, resolve: Callable[[Optional[str]], Op
             body = self._body()
             if self.path.rstrip("/") == "/health" and not (gate.ok.get(backend) and not gate.closed):
                 return self._plain(503, "gpu-manager: interactive pair is down; requests queue\n")
-            outcome = gate.admit(backend, is_interactive(self.client_address[0]),
+            outcome = gate.admit(backend, tiered and is_interactive(self.client_address[0]),
                                  gone=lambda: client_gone(self.connection),
                                  model=resolve(requested_model(body, self.path)))
             if outcome == GONE:
@@ -210,17 +225,17 @@ def make_handler(gate: Gate, backend: int, resolve: Callable[[Optional[str]], Op
                 except OSError:
                     pass
             finally:
-                gate.done()
+                gate.done(backend)
 
         do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_HEAD = _handle
 
     return Handler
 
 
-def serve(gate: Gate, listen, port: int, backend: int, resolve=lambda m: None):
+def serve(gate: Gate, listen, port: int, backend: int, resolve=lambda m: None, tiered: bool = True):
     servers = []
     for addr in listen:
-        srv = http.server.ThreadingHTTPServer((addr, port), make_handler(gate, backend, resolve))
+        srv = http.server.ThreadingHTTPServer((addr, port), make_handler(gate, backend, resolve, tiered))
         srv.daemon_threads = True
         threading.Thread(target=srv.serve_forever, daemon=True,
                          name=f"proxy-{addr}:{port}").start()

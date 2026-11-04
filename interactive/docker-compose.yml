@@ -27,7 +27,7 @@ services:
     image: caddy:2-alpine
     networks:
       journal:
-        aliases: [llm, asr]
+        aliases: [llm, asr, ocr]
     environment:
       # The Journal network's gateway: the host address the broker listens on for it.
       - BROKER_HOST=${GATE_BROKER_HOST:-172.18.0.1}
@@ -158,3 +158,43 @@ services:
       # 2.5GB loads far faster than the 27B, but the audio tower is a second file.
       start_period: 90s
     restart: unless-stopped
+
+  # On-demand OCR server (Chandra OCR 2 by default). Not part of the pair: the broker
+  # starts it when a request arrives on :8007 and stops it once idle, so it holds no
+  # VRAM between bursts. Callers on Journal's network reach it as `ocr:8007`.
+  ocr:
+    logging: *default-logging
+    image: ${OCR_IMAGE:-docker-llm:latest}
+    profiles: ["ocr"]
+    ports:
+      - "127.0.0.1:18007:8007"
+    volumes:
+      - ${MODELS_HOST_PATH:-./models}:/models:ro
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "44"    # video
+      - "992"   # render
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      - ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-0}
+    command: >
+      --host 0.0.0.0
+      --port 8007
+      --model /models/gguf/${OCR_MODEL_FILE:-chandra-ocr-2.BF16.gguf}
+      --mmproj /models/gguf/${OCR_MMPROJ_FILE:-chandra-ocr-2.mmproj-bf16.gguf}
+      --alias ${OCR_MODEL_ALIAS:-chandra-ocr-2}
+      --ctx-size ${OCR_CTX_SIZE:-16384}
+      --parallel ${OCR_PARALLEL:-1}
+      --n-gpu-layers 999
+      --jinja
+      --temp 0
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8007/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    restart: "no"

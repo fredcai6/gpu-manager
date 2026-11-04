@@ -37,3 +37,12 @@
 # env_file = "~/.config/gpu-manager/big.env"
 # aliases = ["big-model-file-name"]
 # vram_mib = 27500
+
+# On-demand GPU servers: started by the first request on `port`, stopped once idle.
+# Each runs the compose service of the same name (profile of the same name) and
+# listens on 127.0.0.1:`backend`.
+# [services.ocr]
+# port = 8007
+# backend = 18007
+# vram_mib = 11000
+# idle_seconds = 120
