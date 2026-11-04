@@ -1,0 +1,160 @@
+# The interactive tier: llama.cpp (ROCm) `llm` and `asr`, plus `gate`. The broker owns
+# :8005/:8006 on the host and forwards to these on 127.0.0.1:18005/18006.
+#
+# Runtime values (model files, MODELS_HOST_PATH, aliases) come from the env file named
+# by `env_file` in the broker config, via the variable names below; everything after
+# `:-` is only a default.
+name: interactive
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+# Journal's clients reach `llm:8005` / `asr:8006` by name on Journal's network. The
+# `gate` container holds those names there and forwards to the broker on the host,
+# which queues requests while the card is lent to batch work and forwards to the
+# servers on 127.0.0.1:18005 / 18006 when they are up.
+networks:
+  journal:
+    external: true
+    name: ${JOURNAL_NETWORK:-docker_default}
+
+services:
+  gate:
+    logging: *default-logging
+    image: caddy:2-alpine
+    networks:
+      journal:
+        aliases: [llm, asr]
+    environment:
+      # The Journal network's gateway: the host address the broker listens on for it.
+      - BROKER_HOST=${GATE_BROKER_HOST:-172.18.0.1}
+    volumes:
+      - ./gate/Caddyfile:/etc/caddy/Caddyfile:ro
+    restart: unless-stopped
+
+  llm:
+    logging: *default-logging
+    # keep the historical image tag so dependents of `docker-llm` are unchanged.
+    image: docker-llm:latest
+    # SHIPS DARK. up.sh runs a bare `compose up --build`, so without a profile this
+    # would start on every invocation and restart-loop until the weights drive is
+    # mounted and a GGUF is downloaded. Enable by setting COMPOSE_PROFILES=llm in
+    # .env once `sudo ./scripts/setup-models-drive.sh` and fetch-model.sh have run.
+    profiles: ["llm"]
+    build:
+      context: ./llm
+      dockerfile: Dockerfile
+      args:
+        ROCM_VERSION: ${ROCM_VERSION:-7.2.4}
+        LLAMA_CPP_REF: ${LLAMA_CPP_REF:-b10327}
+    ports:
+      # Behind the broker: gpu-manager owns :8005 and forwards here.
+      - "127.0.0.1:18005:8005"
+    volumes:
+      # Weights live on the data drive, read-only to the server. Never baked into
+      # the image — a 17GB layer would make every rebuild unbearable.
+      - ${MODELS_HOST_PATH:-./models}:/models:ro
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    # The host user need not be in render/video; granting the container the GIDs directly avoids
+    # changing the host account. Numeric because the container's own group table
+    # does not necessarily map these names to the same IDs.
+    group_add:
+      - "44"    # video
+      - "992"   # render
+    security_opt:
+      - seccomp:unconfined
+    ipc: host
+    shm_size: 8gb
+    environment:
+      # gfx1201 is natively supported from ROCm 7.2 on — no HSA_OVERRIDE_GFX_VERSION
+      # needed. Uncomment only if a future base image drops the target.
+      # - HSA_OVERRIDE_GFX_VERSION=12.0.1
+      #
+      # Do NOT set GGML_CUDA_ENABLE_UNIFIED_MEMORY here, not even to 0. llama.cpp
+      # tests that variable for PRESENCE, not value, so `=0` turns unified memory
+      # ON and silently pushes weights into host RAM — measured 16 tok/s and
+      # 320MB VRAM, versus 112 tok/s and 3.3GB VRAM with it absent.
+      - ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-0}
+    command: >
+      --host 0.0.0.0
+      --port 8005
+      --model /models/gguf/${LLM_MODEL_FILE:-Qwen3.8-27B-Q4_K_M.gguf}
+      --mmproj /models/gguf/${LLM_MMPROJ_FILE:-mmproj-Qwen3.8-27B-f16.gguf}
+      --device ${LLM_DEVICE:-ROCm0}
+      --alias ${LLM_MODEL_ALIAS:-local}
+      --ctx-size ${LLM_CTX_SIZE:-65536}
+      --n-gpu-layers ${LLM_NGL:-999}
+      --flash-attn ${LLM_FLASH_ATTN:-on}
+      --parallel ${LLM_PARALLEL:-16}
+      --jinja
+      ${LLM_EXTRA_ARGS:-}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8005/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      # Loading 17GB of weights off NVMe into VRAM is not a 10s operation.
+      start_period: 180s
+    restart: unless-stopped
+
+  asr:
+    logging: *default-logging
+    # keep the historical image tag so dependents of `docker-asr` are unchanged.
+    image: docker-asr:latest
+    # SHIPS DARK, on its own profile. Separate from `llm` on purpose: the 27B chat
+    # model and the 1.7B transcriber are independently useful, and transcription
+    # should not require 17GB of unrelated weights to be resident.
+    #
+    # Same build as `llm` — identical context and args, so the layer cache makes
+    # this a no-op second build rather than a second 20-minute ROCm compile. Do
+    # NOT let the two drift apart; a mismatched LLAMA_CPP_REF would rebuild both.
+    profiles: ["asr"]
+    build:
+      context: ./llm
+      dockerfile: Dockerfile
+      args:
+        ROCM_VERSION: ${ROCM_VERSION:-7.2.4}
+        LLAMA_CPP_REF: ${LLAMA_CPP_REF:-b10327}
+    ports:
+      - "127.0.0.1:18006:8006"
+    volumes:
+      - ${MODELS_HOST_PATH:-./models}:/models:ro
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "44"    # video
+      - "992"   # render
+    security_opt:
+      - seccomp:unconfined
+    ipc: host
+    shm_size: 8gb
+    environment:
+      # Same unified-memory warning as `llm` applies here — never set
+      # GGML_CUDA_ENABLE_UNIFIED_MEMORY, not even to 0.
+      - ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-0}
+    command: >
+      --host 0.0.0.0
+      --port 8006
+      --model /models/gguf/${ASR_MODEL_FILE:-Qwen3-ASR-1.7B-Q8_0.gguf}
+      --mmproj /models/gguf/${ASR_MMPROJ_FILE:-mmproj-Qwen3-ASR-1.7B-Q8_0.gguf}
+      --device ${ASR_DEVICE:-ROCm0}
+      --alias ${ASR_MODEL_ALIAS:-local-asr}
+      --ctx-size ${ASR_CTX_SIZE:-32768}
+      --n-gpu-layers ${ASR_NGL:-999}
+      --flash-attn ${ASR_FLASH_ATTN:-on}
+      --parallel ${ASR_PARALLEL:-1}
+      --jinja
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8006/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      # 2.5GB loads far faster than the 27B, but the audio tower is a second file.
+      start_period: 90s
+    restart: unless-stopped

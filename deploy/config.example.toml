@@ -1,0 +1,24 @@
+# Copy to ~/.config/gpu-manager/config.toml. Every key is optional; defaults are in
+# gpu_manager/config.py.
+
+# The compute card's PCI address (`gpu status` lists them). Unset: the AMD card with
+# the most VRAM.
+# pci_id = "0000:03:00.0"
+
+# Env file for `docker compose` on interactive/docker-compose.yml: model file names,
+# MODELS_HOST_PATH, aliases.
+# env_file = "~/models.env"
+
+# Proxy listen addresses. Loopback callers are batch; requests arriving on a Docker
+# bridge gateway (the gate container, host.docker.internal) are interactive.
+# listen = ["127.0.0.1", "172.17.0.1", "172.18.0.1"]
+
+# Where the status page is written. Add a static site's directory to read it remotely.
+# page_dirs = ["~/.local/state/gpu-manager/page", "/srv/site/gpu-status"]
+
+# Batch may take the card after this long without an interactive request.
+# hold_minutes = 30
+
+# Peak VRAM of the interactive pair, and headroom kept free on top of every job.
+# pair_vram_mib = 30000
+# margin_mib = 1024

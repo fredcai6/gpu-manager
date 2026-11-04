@@ -1,0 +1,8 @@
+.constellation-pi/
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+.agent-work/

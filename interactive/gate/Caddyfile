@@ -1,0 +1,17 @@
+# Holds the `llm` / `asr` names on Journal's network and forwards to the broker.
+{
+	admin off
+	auto_https off
+}
+
+:8005 {
+	reverse_proxy {$BROKER_HOST}:8005 {
+		flush_interval -1
+	}
+}
+
+:8006 {
+	reverse_proxy {$BROKER_HOST}:8006 {
+		flush_interval -1
+	}
+}
