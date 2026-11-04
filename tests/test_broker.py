@@ -5,6 +5,7 @@ import http.server
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -177,6 +178,33 @@ class TestProxy(unittest.TestCase):
         self.assertEqual(out[0][1].count("data:"), 3)
         self.assertIn("hi", out[0][1])
         self.assertEqual(self.gate.in_flight, 0)
+
+    def test_caller_that_hangs_up_is_dropped_not_sent_later(self):
+        hits = []
+        orig = Backend.do_POST
+
+        def counting(handler):
+            hits.append(1)
+            orig(handler)
+        Backend.do_POST = counting
+        try:
+            sock = socket.create_connection(("127.0.0.1", self.port))
+            sock.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+                         b"Content-Length: 2\r\n\r\nhi")
+            deadline = time.time() + 5
+            while self.gate.waiting == 0 and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(self.gate.waiting, 1)
+            sock.close()
+            deadline = time.time() + 5
+            while self.gate.waiting and time.time() < deadline:
+                time.sleep(0.1)
+            self.assertEqual(self.gate.waiting, 0, "hung-up caller must leave the queue")
+            self.gate.set_ok(self.bport, True)
+            time.sleep(0.5)
+            self.assertEqual(hits, [], "a dropped request must never reach the backend")
+        finally:
+            Backend.do_POST = orig
 
     def test_loopback_is_batch(self):
         self.gate.set_ok(self.bport, True)

@@ -11,9 +11,14 @@ from __future__ import annotations
 import http.client
 import http.server
 import ipaddress
+import select
+import socket
 import threading
 import time
-from typing import Dict
+from typing import Callable, Dict, Optional
+
+# admit() outcomes
+ADMITTED, TIMED_OUT, GONE = "admitted", "timed out", "gone"
 
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
        "trailers", "transfer-encoding", "upgrade", "content-length", "host"}
@@ -25,6 +30,7 @@ class Gate:
         self.ok: Dict[int, bool] = {}
         self.closed = False
         self.in_flight = 0
+        self.waiting = 0
         self.waiting_interactive = 0
         self.last_interactive_at = 0.0
         self.queue_wait_seconds = queue_wait_seconds
@@ -47,21 +53,28 @@ class Gate:
             self.closed = False
             self.cond.notify_all()
 
-    def admit(self, backend: int, interactive: bool) -> bool:
+    def admit(self, backend: int, interactive: bool,
+              gone: Optional[Callable[[], bool]] = None) -> str:
+        """Wait until the backend is up. A caller that disconnects while waiting is
+        dropped, so requests nobody is waiting for are never sent on later."""
         with self.cond:
             if interactive:
                 self.last_interactive_at = time.time()
                 self.waiting_interactive += 1
+            self.waiting += 1
             deadline = time.time() + self.queue_wait_seconds
             try:
                 while self.closed or not self.ok.get(backend):
                     left = deadline - time.time()
                     if left <= 0:
-                        return False
-                    self.cond.wait(min(left, 5))
+                        return TIMED_OUT
+                    if gone is not None and gone():
+                        return GONE
+                    self.cond.wait(min(left, 1))
                 self.in_flight += 1
-                return True
+                return ADMITTED
             finally:
+                self.waiting -= 1
                 if interactive:
                     self.waiting_interactive -= 1
 
@@ -69,6 +82,16 @@ class Gate:
         with self.cond:
             self.in_flight -= 1
             self.cond.notify_all()
+
+
+def client_gone(sock) -> bool:
+    """True once the caller has closed its end. The request body is already read, so
+    a readable socket here means EOF (or a pipelined request, which counts as alive)."""
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+        return bool(readable) and sock.recv(1, socket.MSG_PEEK) == b""
+    except OSError:
+        return True
 
 
 def is_interactive(addr: str) -> bool:
@@ -113,7 +136,12 @@ def make_handler(gate: Gate, backend: int):
             body = self._body()
             if self.path.rstrip("/") == "/health" and not (gate.ok.get(backend) and not gate.closed):
                 return self._plain(503, "gpu-manager: interactive pair is down; requests queue\n")
-            if not gate.admit(backend, is_interactive(self.client_address[0])):
+            outcome = gate.admit(backend, is_interactive(self.client_address[0]),
+                                 gone=lambda: client_gone(self.connection))
+            if outcome == GONE:
+                self.close_connection = True
+                return
+            if outcome == TIMED_OUT:
                 return self._plain(503, "gpu-manager: timed out waiting for the GPU\n")
             try:
                 conn = http.client.HTTPConnection("127.0.0.1", backend, timeout=None)

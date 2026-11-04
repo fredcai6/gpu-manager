@@ -172,7 +172,7 @@ class Daemon:
         self.apply(actions)
         self.store.set_kv("daemon", {"at": time.time(), "pair": self.pair,
                                      "vram_total_mib": total, "vram_used_mib": used,
-                                     "busy_pct": busy, "card": card, "in_flight": self.gate.in_flight,
+                                     "busy_pct": busy, "card": card, "in_flight": self.gate.in_flight, "waiting": self.gate.waiting,
                                      "waiting_interactive": self.gate.waiting_interactive})
 
     def publish_page(self) -> None:

@@ -80,8 +80,9 @@ def render_text(s: Dict[str, Any]) -> str:
         left = s["hold_seconds_left"] or 0
         line += "; batch may take the card now" if left <= 0 else f"; batch may take the card in {_ago(left)}"
     out.append(line)
-    if b.get("waiting_interactive"):
-        out.append(f"  {b['waiting_interactive']} interactive request(s) waiting for the pair")
+    if b.get("waiting"):
+        out.append(f"  {b['waiting']} request(s) waiting for the pair"
+                   f" ({b.get('waiting_interactive', 0)} interactive)")
     out.append("  Running:" if s["running"] else "  Running: none")
     for j in s["running"]:
         out.append(f"    #{j['id']} {j['name']}  {j['vram_mib'] / 1024:.1f} GB  {j['status']}"
