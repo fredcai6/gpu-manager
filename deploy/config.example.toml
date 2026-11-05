@@ -9,8 +9,8 @@
 # MODELS_HOST_PATH, aliases.
 # env_file = "~/models.env"
 
-# Proxy listen addresses. Loopback callers are batch; requests arriving on a Docker
-# bridge gateway (the gate container, host.docker.internal) are interactive.
+# Proxy listen addresses: loopback, plus the Docker bridge gateways that client
+# containers (the gate, host.docker.internal) arrive on.
 # listen = ["127.0.0.1", "172.17.0.1", "172.18.0.1"]
 
 # Where the status page is written. Add a static site's directory to read it remotely.
