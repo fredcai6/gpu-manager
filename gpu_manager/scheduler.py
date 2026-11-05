@@ -15,7 +15,10 @@ Rules, in order:
 5. With nothing waiting, the pair comes back up when it fits, with the wanted model.
 6. When the wanted model differs from the loaded one, the llm is recreated with it
    once it fits; meanwhile no batch job starts that would keep it from fitting.
-7. An on-demand service starts when a request waits for it and it fits, ahead of
+7. In a reserve window the pair stays up with the wanted (default) model: it is
+   brought up even with jobs queued, never stopped for batch, and a job starts
+   only if it fits beside it. Running jobs are left alone.
+8. An on-demand service starts when a request waits for it and it fits, ahead of
    queued batch (a caller is waiting). It stops once idle for its limit, or at once
    when idle and its room is needed by a model swap or the head of the queue.
 """
@@ -58,6 +61,7 @@ class View:
     loaded: Optional[str] = None    # model the llm container runs (None: unknown)
     want: Optional[str] = None      # model it should run (None: the only/first one)
     services: Sequence[Svc] = ()
+    reserved: bool = False          # inside a reserve window
 
 
 def decide(v: View, margin_mib: int, vram: Union[int, Dict[str, int]], hold_minutes: float,
@@ -97,7 +101,8 @@ def decide(v: View, margin_mib: int, vram: Union[int, Dict[str, int]], hold_minu
             actions.append(("start_pair", want))
         return actions
 
-    pair_mib = held_mib if pair_holds else 0
+    # In a reserve window the pair's room is spoken for even while it is down.
+    pair_mib = held_mib if pair_holds else (want_mib if v.reserved else 0)
     # Switching models: recreate the llm with the wanted one once it fits. Until it
     # fits, no batch job may start that would keep it from ever fitting.
     swap_blocked = False
@@ -148,7 +153,10 @@ def decide(v: View, margin_mib: int, vram: Union[int, Dict[str, int]], hold_minu
         room -= job.vram_mib
         free -= job.vram_mib
 
-    if waiting:
+    if v.reserved:
+        if v.pair == "down" and cap - committed >= want_mib and free >= want_mib:
+            actions.append(("start_pair", want))
+    elif waiting:
         first = waiting[0]
         idle_min = (v.now - v.last_interactive_at) / 60.0
         if v.pair == "up" and not swap_blocked and first.vram_mib <= cap - committed \

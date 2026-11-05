@@ -59,6 +59,11 @@ rewrites it every 30 s into each directory in `page_dirs`.
   request has named a different one for `hold_minutes`. Requests naming no
   registered model (e.g. `"local"`) are served by whatever is loaded. Only the LLM
   is recreated; the transcriber keeps running.
+- **Reserve windows:** `reserve_windows = ["07:30-08:00"]` keeps the pair up with the
+  default model at times you expect to use it (local time). No job starts that wouldn't
+  fit beside it, the pair isn't stopped for batch, and requests naming another model
+  wait for the window to end. Running jobs are left alone: a fit that holds the whole
+  card keeps it, and the pair comes up once there's room.
 - **On-demand services:** a `[services.NAME]` table gives a GPU server its own port
   (e.g. an OCR model on :8007, `ocr:8007` through the gate) without holding VRAM
   between uses. The first request starts it (the compose service of the same name,

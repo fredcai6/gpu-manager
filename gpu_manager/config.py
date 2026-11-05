@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import time
 import tomllib
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -67,6 +68,11 @@ class Config:
     services: Dict[str, Service] = dataclasses.field(default_factory=dict)
     # Batch may take the card once no interactive request has arrived for this long.
     hold_minutes: float = 30.0
+    # Daily windows ("HH:MM-HH:MM", local time) when the interactive pair is kept up
+    # with the default model: no job starts that wouldn't fit beside it, the pair is
+    # not stopped for batch, and requests for another model wait for the window to
+    # end. Running jobs are left alone.
+    reserve_windows: Tuple[str, ...] = ()
     # Off: an interactive request waits for running batch work instead of evicting it.
     preempt_on_interactive: bool = False
     compose_file: Path = REPO / "interactive/docker-compose.yml"
@@ -112,6 +118,16 @@ class Config:
             if requested == m.name or requested in m.aliases:
                 return m.name
         return None
+
+    def reserved(self, when: float) -> bool:
+        """Whether `when` (epoch seconds) falls in a reserve window, in local time."""
+        t = time.localtime(when)
+        minute = t.tm_hour * 60 + t.tm_min
+        for w in self.reserve_windows:
+            start, end = (int(h) * 60 + int(m) for h, m in (p.split(":") for p in w.split("-")))
+            if (start <= minute < end) if start <= end else (minute >= start or minute < end):
+                return True
+        return False
 
     def job_dir(self, job_id: int) -> Path:
         return self.state_dir / "jobs" / str(job_id)

@@ -105,8 +105,9 @@ class TestScheduler(unittest.TestCase):
         loaded = kw.pop("loaded", "dory")
         want = kw.pop("want", "dory")
         services = kw.pop("services", ())
+        reserved = kw.pop("reserved", False)
         v = view(**kw)
-        v.loaded, v.want, v.services = loaded, want, services
+        v.loaded, v.want, v.services, v.reserved = loaded, want, services, reserved
         if kw["used"] is None:
             v.vram_used_mib = (self.MODELS[loaded] if v.pair != "down" else 0) + sum(j.vram_mib for j in v.active)
         return decide(v, MARGIN, self.MODELS, 30, False)
@@ -173,6 +174,22 @@ class TestScheduler(unittest.TestCase):
     def test_busy_service_is_not_stopped_for_a_swap(self):
         s = self.sv("up", in_flight=1, idle_seconds=0)
         self.assertEqual(self.mv(want="qwen", services=[s], used=12500 + 11500), [])
+
+    # -- reserve window -------------------------------------------------------------
+    def test_window_keeps_the_pair_up_past_the_hold(self):
+        self.assertEqual(self.mv(queued=[job(1, 25000)], idle_min=90, reserved=True), [])
+
+    def test_window_brings_the_pair_up_even_with_jobs_queued(self):
+        self.assertEqual(self.mv(pair="down", queued=[job(1, 25000)], reserved=True),
+                         [("start_pair", "dory")])
+
+    def test_window_lets_a_job_start_that_fits_beside_the_pair(self):
+        acts = self.mv(pair="down", queued=[job(1, 10000)], reserved=True)
+        self.assertEqual(acts, [("start_job", 1), ("start_pair", "dory")])
+
+    def test_window_leaves_a_running_big_job_alone(self):
+        running = job(9, 25000, status="running", started=1.0)
+        self.assertEqual(self.mv(pair="down", active=[running], reserved=True), [])
 
     def test_unreadable_card_starts_nothing(self):
         v = view(queued=[job(1, 500)], pair="down")

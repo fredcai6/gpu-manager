@@ -197,6 +197,8 @@ class Daemon:
         for by name within the hold, else the default. A service waiting for room
         outranks the hold: the pair goes back to the default to make that room."""
         default = self.cfg.default
+        if self.cfg.reserved(now):
+            return default  # requests for another model wait for the window to end
         waiting = {m: n for m, n in self.gate.waiting_for.items() if n > 0}
         if waiting:
             if self.gate.loaded in waiting:
@@ -263,6 +265,7 @@ class Daemon:
             demand_pending=self.gate.waiting_interactive > 0,
             loaded=self.gate.loaded, want=want,
             services=self.services_view(now),
+            reserved=self.cfg.reserved(now),
         )
         pair_busy = self.pair_action is not None and self.pair_action.is_alive()
         vram = {m.name: m.vram_mib for m in self.cfg.model_table().values()}
@@ -279,7 +282,8 @@ class Daemon:
                                      "waiting_interactive": self.gate.waiting_interactive,
                                      "model": self.gate.loaded, "want": want,
                                      "waiting_for": dict(self.gate.waiting_for),
-                                     "services": {n: self.svc_state[n] for n in self.cfg.services}})
+                                     "services": {n: self.svc_state[n] for n in self.cfg.services},
+                                     "reserved": self.cfg.reserved(now)})
 
     def publish_page(self) -> None:
         if time.time() - self.page_at < self.cfg.page_seconds:

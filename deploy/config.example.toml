@@ -19,6 +19,9 @@
 # Batch may take the card after this long without an interactive request.
 # hold_minutes = 30
 
+# Daily windows (local time) when the interactive pair stays up with the default model.
+# reserve_windows = ["07:30-08:00"]
+
 # Headroom kept free on top of every job and the pair.
 # margin_mib = 1024
 
