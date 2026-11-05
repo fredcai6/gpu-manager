@@ -16,7 +16,7 @@
 # Where the status page is written. Add a static site's directory to read it remotely.
 # page_dirs = ["~/.local/state/gpu-manager/page", "/srv/site/gpu-status"]
 
-# Batch may take the card after this long without an interactive request.
+# Batch may take the card after this long without an assistant request (X-GPU-Hold: 1).
 # hold_minutes = 30
 
 # Daily windows (local time) when the interactive pair stays up with the default model.

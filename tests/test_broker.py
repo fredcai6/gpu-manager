@@ -179,10 +179,10 @@ class TestProxy(unittest.TestCase):
         self.front.shutdown()
         self.backend.shutdown()
 
-    def post(self, out):
+    def post(self, out, headers=None):
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=20)
         c.request("POST", "/v1/chat/completions", body=b"hi",
-                  headers={"Content-Type": "application/json"})
+                  headers={"Content-Type": "application/json", **(headers or {})})
         r = c.getresponse()
         out.append((r.status, r.read().decode()))
 
@@ -262,12 +262,15 @@ class TestProxy(unittest.TestCase):
         self.assertEqual(named, [200])
         self.assertIn("qwen", self.gate.asked_at)
 
-    def test_loopback_is_batch(self):
+    def test_only_requests_marked_as_assistant_use_hold_the_pair(self):
         self.gate.set_ok(self.bport, True)
         self.post([])
         self.assertEqual(self.gate.last_interactive_at, 0.0)
-        self.assertFalse(proxy.is_interactive("127.0.0.1"))
-        self.assertTrue(proxy.is_interactive("172.18.0.12"))
+        self.post([], headers={"X-GPU-Hold": "1"})
+        self.assertGreater(self.gate.last_interactive_at, 0.0)
+        self.assertFalse(proxy.holds_pair({}))
+        self.assertFalse(proxy.holds_pair({"X-GPU-Hold": "0"}))
+        self.assertTrue(proxy.holds_pair({"X-GPU-Hold": "1"}))
 
     def test_drain_waits_for_in_flight(self):
         self.gate.set_ok(self.bport, True)

@@ -1,16 +1,15 @@
 """Front door for :8005 / :8006. Callers keep their URLs; requests wait while the
 interactive pair is down and go through once it is back.
 
-Tier comes from where a request arrives: loopback is a host caller (scripts,
-pipelines), so batch; a Docker bridge address is a client container (via the gate,
-or host.docker.internal), so interactive. Only interactive requests reset the hold.
+Only a request marked `X-GPU-Hold: 1` counts as interactive: the owner using the
+assistant. It resets the hold that keeps batch off the card. Everything else
+(pipelines, captures, compiles, wherever they come from) waits without holding.
 """
 
 from __future__ import annotations
 
 import http.client
 import http.server
-import ipaddress
 import json
 import select
 import socket
@@ -128,11 +127,12 @@ def client_gone(sock) -> bool:
         return True
 
 
-def is_interactive(addr: str) -> bool:
-    try:
-        return not ipaddress.ip_address(addr).is_loopback
-    except ValueError:
-        return False
+HOLD_HEADER = "X-GPU-Hold"
+
+
+def holds_pair(headers) -> bool:
+    """Whether a request is the owner using the assistant (`X-GPU-Hold: 1`)."""
+    return (headers.get(HOLD_HEADER) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def requested_model(body: bytes, path: str = "") -> Optional[str]:
@@ -150,10 +150,7 @@ def requested_model(body: bytes, path: str = "") -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
-def make_handler(gate: Gate, backend: int, resolve: Callable[[Optional[str]], Optional[str]] = lambda m: None,
-                 tiered: bool = True):
-    """`tiered`: requests from a Docker bridge count as interactive and hold the pair.
-    Off for on-demand services, whose callers should not keep batch off the card."""
+def make_handler(gate: Gate, backend: int, resolve: Callable[[Optional[str]], Optional[str]] = lambda m: None):
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"
 
@@ -188,7 +185,7 @@ def make_handler(gate: Gate, backend: int, resolve: Callable[[Optional[str]], Op
             body = self._body()
             if self.path.rstrip("/") == "/health" and not (gate.ok.get(backend) and not gate.closed):
                 return self._plain(503, "gpu-manager: interactive pair is down; requests queue\n")
-            outcome = gate.admit(backend, tiered and is_interactive(self.client_address[0]),
+            outcome = gate.admit(backend, holds_pair(self.headers),
                                  gone=lambda: client_gone(self.connection),
                                  model=resolve(requested_model(body, self.path)))
             if outcome == GONE:
@@ -232,10 +229,10 @@ def make_handler(gate: Gate, backend: int, resolve: Callable[[Optional[str]], Op
     return Handler
 
 
-def serve(gate: Gate, listen, port: int, backend: int, resolve=lambda m: None, tiered: bool = True):
+def serve(gate: Gate, listen, port: int, backend: int, resolve=lambda m: None):
     servers = []
     for addr in listen:
-        srv = http.server.ThreadingHTTPServer((addr, port), make_handler(gate, backend, resolve, tiered))
+        srv = http.server.ThreadingHTTPServer((addr, port), make_handler(gate, backend, resolve))
         srv.daemon_threads = True
         threading.Thread(target=srv.serve_forever, daemon=True,
                          name=f"proxy-{addr}:{port}").start()

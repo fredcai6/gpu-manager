@@ -45,9 +45,8 @@ class Daemon:
         self.svc_action: dict = {}
         self.svc_up_at: dict = {}
         self.page_at = 0.0
-        # No history after a (re)start: hold from now rather than evict at once.
-        self.gate.last_interactive_at = max(
-            self.store.get_kv("last_interactive_at", 0.0), time.time())
+        # The hold runs from the owner's last assistant request, across restarts.
+        self.gate.last_interactive_at = self.store.get_kv("last_interactive_at", 0.0)
 
     # -- reconcile --------------------------------------------------------
     def reconcile_jobs(self) -> None:
@@ -301,7 +300,7 @@ class Daemon:
         proxy.serve(self.gate, self.cfg.listen, self.cfg.llm_port, self.cfg.llm_backend, self.cfg.resolve)
         proxy.serve(self.gate, self.cfg.listen, self.cfg.asr_port, self.cfg.asr_backend)
         for svc in self.cfg.services.values():
-            proxy.serve(self.gate, self.cfg.listen, svc.port, svc.backend, tiered=False)
+            proxy.serve(self.gate, self.cfg.listen, svc.port, svc.backend)
         self.store.event(None, "broker started")
         while True:
             try:

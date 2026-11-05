@@ -47,7 +47,7 @@ rewrites it every 30 s into each directory in `page_dirs`.
   (:8006), serving chat, voice notes and tutoring clients. The model, image and
   flags come from the env file (`LLM_IMAGE`, `LLM_MODEL_FILE`, `LLM_EXTRA_ARGS`, ...);
   set `pair_vram_mib` to what the pair measures.
-- **Batch takes the card** once no interactive request has arrived for 30 minutes.
+- **Batch takes the card** once no assistant request (`X-GPU-Hold: 1`) has arrived for 30 minutes.
   The broker lets in-flight requests finish (up to 2 minutes), stops the pair, and
   runs jobs first come, first served. A later job may start beside others only if it
   doesn't delay the job at the head of the queue.
@@ -74,13 +74,13 @@ rewrites it every 30 s into each directory in `page_dirs`.
   job starts that would keep a waiting one out. Its callers don't reset the hold.
   Measured: a cold start plus one page is ~13 s; handing the room back to the 27B
   is ~12 s.
-- **No preemption:** an interactive request does not evict batch work
+- **No preemption:** an assistant request does not evict batch work
   (`preempt_on_interactive = false`).
 - **Requests wait:** any request to :8005/:8006 waits while the pair is down, and
   goes through once it is back. `/health` answers 503 at once instead of waiting.
-- **Tiers by origin:** loopback callers (scripts, pipelines) are batch. Requests from
-  Docker bridges (clients via the `gate` container or `host.docker.internal`) are
-  interactive. Only interactive requests reset the hold.
+- **Only assistant use holds the card:** a request sent with `X-GPU-Hold: 1` (the owner
+  talking to the assistant) resets the 30-minute hold; nothing else does, whatever its
+  origin. The hold runs from the last such request and survives broker restarts.
 
 Measured on a 32 GB Radeon AI PRO R9700, with Qwen3-ASR 1.7B as the transcriber:
 
